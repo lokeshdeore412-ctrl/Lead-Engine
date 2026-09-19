@@ -194,47 +194,11 @@ LEAD ENGINE
 
 The current V1 package was developed and tested with:
 
-|
-
-Component
-
-|
-
-Version
-
-|
-
-| --- | --- |
-
-|
-
-Node.js
-
-|
-
-`v22.22.0`
-
-|
-
-|
-
-n8n
-
-|
-
-`2.32.7`
-
-|
-
-|
-
-PostgreSQL
-
-|
-
-`17.10`
-
-|
+| Component | Version |
+| :--- | :--- |
+| **Node.js** | `v22.22.0` |
+| **n8n** | `2.32.7` |
+| **PostgreSQL** | `17.10` |
 
 External services such as enrichment providers, AI providers, and Slack require valid credentials where used.
 
