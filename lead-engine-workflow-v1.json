@@ -1,0 +1,2057 @@
+﻿{
+  "name": "Lead Engine Workflow v1",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-ingest",
+        "options": {
+          "allowedOrigins": "*",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "b9a29ee5-ec80-46de-b66c-24bf8e48ce37",
+      "name": "Webhook Ingestion Gate",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -1568,
+        288
+      ],
+      "webhookId": "cd0e862d-ee1f-4a15-8ba0-85cde173857b",
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "retryOnFail": false,
+      "notes": "Inbound lead capture"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"success\",\n  \"message\": \"Lead registered safely for processing\",\n  \"lead_id\": \"{{ $json.lead_id }}\"\n}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "9bb2ac95-9c8e-4363-a1ed-114135d2b61e",
+      "name": "Respond to Webhook (202 Accepted)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "retryOnFail": false,
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "maxTries": 2,
+      "notes": "Confirms lead identity captured and send confirmation data back to browser"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\n  \"status\": \"error\",\n  \"message\": \"Lead could not be safely registered.\",\n  \"failure_type\": \"SYSTEM_FAILURE\"\n}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "072fdd37-a783-4aed-aceb-d23e3adbb9ce",
+      "name": "Respond to Webhook (500 Error)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -672,
+        384
+      ],
+      "retryOnFail": false,
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "maxTries": 2,
+      "notes": "FAILED = system/storage/workflow failure only; malformed or suspicious lead data is still REGISTERED with warnings."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "//========================================================================\n// BLOCK 1: ADJUSTABLE MATRIX CONFIGURATION\n//========================================================================\nconst matrixConfig = {\n  ranges: {\n    revenue: { min: 0, max: 10000000, weight: 40 },\n    employees: { min: 0, max: 500, weight: 30 }\n  },\n  weights: {\n    funding: {\n      \"public\": 15, \"ipo\": 15, \"series d\": 15, \"series c\": 15, \n      \"series b\": 12, \"series a\": 10, \"seed\": 5, \"bootstrapped\": 2\n    },\n    intent: {\n      \"sales_contact\": 50,\n      \"demo_request\": 40,\n      \"pricing_interest\": 30,\n      \"product_exploration\": 20,\n      \"resource_interest\": 10\n    }\n  },\n  tierThresholds: {\n    Tier_1: 55,\n    Tier_2: 20\n  },\n  // High-intent signals eligible for edge-case rescue\n  intentOverrides: [\n    \"sales_contact\",\n    \"demo_request\"\n  ]\n};\n\n//========================================================================\n// BLOCK 2: DETERMINISTIC SCORING ENGINE WITH GUARDED OVERRIDES\n//========================================================================\n\nconst getFlexibleValue = (obj, targetKey) => {\n  if (!obj) return undefined;\n  const matchPattern = targetKey.toLowerCase().replace(/[\\s_-]+/g, '');\n  for (const key of Object.keys(obj)) {\n    if (key.toLowerCase().replace(/[\\s_-]+/g, '') === matchPattern) {\n      return obj[key];\n    }\n  }\n  return undefined;\n};\n\n// safe number parser\nconst cleanNumber = (val) => {\n  if (!val || val === -1) return 0;\n  const cleaned = String(val).replace(/[^0-9.]/g, '');\n  const parsed = parseFloat(cleaned);\n  return isNaN(parsed) ? 0 : parsed;\n};\n\n// 1. Ingestion Layer Extraction\nconst dataSource = $json.body ?? $json;\n\nconst rawRevenue   = getFlexibleValue(dataSource, 'annual_revenue') ?? getFlexibleValue($json, 'annual_revenue') ?? 0;\nconst rawEmployees = getFlexibleValue(dataSource, 'employee_count') ?? getFlexibleValue($json, 'employee_count') ?? 0;\nconst rawFunding   = getFlexibleValue(dataSource, 'funding_stage') ?? getFlexibleValue($json, 'funding_stage') ?? \"\";\nconst rawIntent    = getFlexibleValue(dataSource, 'intent_signal') ?? getFlexibleValue($json, 'intent_signal') ?? \"\";\nconst enrichSource = getFlexibleValue(dataSource, 'enrichment_source') ?? getFlexibleValue($json, 'enrichment_source') ?? \"\";\n\nconst revenue      = cleanNumber(rawRevenue);\nconst employees    = cleanNumber(rawEmployees);\nconst fundingStage = String(rawFunding).toLowerCase().trim();\nconst cleanIntent  = String(rawIntent).toLowerCase().replace(/[\\s_-]+/g, '').trim();\n\n// 2. Point Calculations\nlet intentPoints = 0;\nfor (const key of Object.keys(matrixConfig.weights.intent)) {\n  if (key.toLowerCase().replace(/[\\s_-]+/g, '') === cleanIntent) {\n    intentPoints = matrixConfig.weights.intent[key];\n    break;\n  }\n}\n\nconst fundingPoints = matrixConfig.weights.funding[fundingStage] ?? 2;\n\nconst revCfg = matrixConfig.ranges.revenue;\nconst boundedRev = Math.min(Math.max(revenue, revCfg.min), revCfg.max);\nconst revenuePoints = (((boundedRev - revCfg.min) / (revCfg.max - revCfg.min || 1)) * revCfg.weight);\n\nconst empCfg = matrixConfig.ranges.employees;\nconst boundedEmp = Math.min(Math.max(employees, empCfg.min), empCfg.max);\nconst employeePoints = (((boundedEmp - empCfg.min) / (empCfg.max - empCfg.min || 1)) * empCfg.weight);\n\nconst totalLeadScore = Math.round(revenuePoints + employeePoints + fundingPoints + intentPoints);\n\n// 3. Guarded Override Tier Resolution\nlet allocatedTier = \"Tier-3\";\nlet isPriorityOverride = false;\nlet overrideReason = \"No override triggered\";\n\nconst isHighIntent = matrixConfig.intentOverrides.some(\n  override => override.toLowerCase().replace(/[\\s_-]+/g, '') === cleanIntent\n);\n\n// Check if domain was reachable/valid\nconst isValidDomainScrape = enrichSource !== \"META_SCRAPER_FAILED\";\n\nif (totalLeadScore >= matrixConfig.tierThresholds.Tier_1) {\n  allocatedTier = \"Tier-1\";\n} else if (totalLeadScore >= matrixConfig.tierThresholds.Tier_2) {\n  allocatedTier = \"Tier-2\";\n} else if (isHighIntent && isValidDomainScrape) {\n  // EDGE CASE RESCUE: High intent on a valid/active domain elevates score to Tier-2\n  allocatedTier = \"Tier-2\";\n  isPriorityOverride = true;\n  overrideReason = `Rescued via High-Intent (${rawIntent}) on valid domain`;\n} else {\n  allocatedTier = \"Tier-3\";\n}\n\n// 4. Output Integration\nreturn {\n  ...$json,\n  total_lead_score: totalLeadScore,\n  allocated_tier: allocatedTier,\n  revenue_points: Math.round(revenuePoints),\n  employee_points: Math.round(employeePoints),\n  funding_points: fundingPoints,\n  intent_points: intentPoints,\n  is_priority_override: isPriorityOverride,\n  override_reason: overrideReason,\n  company_description: $json.company_description || $json.description || $json.short_description || 'N/A',\n  raw_meta_summary: $json.raw_meta_summary || 'Enriched via Primary Apollo API',\n  enrichment_source: $json.enrichment_source || 'APOLLO',\n  enrichment_success: $json.enrichment_success !== undefined ? $json.enrichment_success : true\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        96
+      ],
+      "id": "356446f8-9018-4b42-b18f-0695f16a983c",
+      "name": "Deterministic Scoring",
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "notes": "Calculates deterministic score based on revenue, employee size, intent, funding stage, and assigns processing tier."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "03a74b71-ac5f-413f-a777-b000ad4498de",
+              "leftValue": "={{ $json.allocated_tier }}",
+              "rightValue": "Tier-3",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1568,
+        96
+      ],
+      "id": "574920f7-2ea7-4847-8c4a-6835de83c68a",
+      "name": "Is High Tier?",
+      "notesInFlow": true,
+      "alwaysOutputData": false,
+      "notes": "Bypasses low-value Tier-3 leads to save processing power. True = Drop/Archive, False = High-Value Route."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "//=========================================================================\n// PRODUCTION KEYWORD SAFETY CATCH TIER-3 (V1.0)\n//=========================================================================\n\n// Config\nconst safetyConfig = {\n  companyKeywords: [\n    \"venture\", \"fund\", \"incubator\", \"accelerator\", \"artificial intelligence\", \n    \"startup\", \"defense\", \"military\", \"aerospace\", \"quantum\", \"enterprise\"\n  ],\n  executiveHandles: [\n    \"ceo\", \"founder\", \"cofounder\", \"co-founder\", \"partner\", \"director\", \"owner\"\n  ],\n  rescueFundingStages: [\n    \"series b\", \"series c\", \"public\"\n  ]\n};\n\n// Extracted context values\nconst status = String($json.status || \"\").toUpperCase();\nconst enrichSource = String($json.enrichment_source || \"\").toUpperCase();\n\nconst isFailedEnrichment = (status === \"ENRICHMENT_FAILED\" || enrichSource === \"META_SCRAPER_FAILED\");\n\nconst description = String($json.company_description || \"\").toLowerCase();\nconst industry = String($json.industry || \"\").toLowerCase();\nconst email = String($json.email || \"\").toLowerCase();\nconst fundingStage = String($json.funding_stage || \"\").toLowerCase().trim();\nconst companyKeywords = String($json.company_keywords || \"\").toLowerCase();\n\nconst emailPrefix = email.split(\"@\")[0] || \"\";\n\nlet isPriorityOverride = false;\nlet overrideReason = \"\";\n\n// =========================================================================\n// COMPONENT 1: Executive Capacity Check (Runs even on unknown domains)\n// =========================================================================\nconst emailTokens = emailPrefix.split(/[^a-z0-9]+/);\n\nif (emailTokens.length > 0) {\n  const firstToken = emailTokens[0];\n  for (const handle of safetyConfig.executiveHandles) {\n    const cleanHandle = handle.toLowerCase().replace(/[^a-z0-9]+/g, '');\n    if (firstToken === cleanHandle) {\n      isPriorityOverride = true;\n      overrideReason = `Executive capacity detected in email: \"${handle}\"`;\n      break;\n    }\n  }\n}\n\n// =========================================================================\n// COMPONENT 2: Funding-Stage Rescue (Requires valid company data)\n// =========================================================================\nif (!isPriorityOverride && !isFailedEnrichment && safetyConfig.rescueFundingStages.includes(fundingStage)) {\n  isPriorityOverride = true;\n  overrideReason = `High-capacity funding stage matched: \"${fundingStage}\"`;\n}\n\n// =========================================================================\n// COMPONENT 3: Firmographic Keyword Check (Guarded against failed scrapes)\n// =========================================================================\nif (!isPriorityOverride && !isFailedEnrichment) {\n  for (const keyword of safetyConfig.companyKeywords) {\n    if (\n      description.includes(keyword) || \n      industry.includes(keyword) || \n      companyKeywords.includes(keyword)\n    ) {\n      isPriorityOverride = true;\n      overrideReason = `High-capacity industry keyword matched: \"${keyword}\"`;\n      break;\n    }\n  }\n}\n\nreturn {\n  ...$json,\n  allocated_tier: \"Tier-3\", \n  is_priority_override: isPriorityOverride,\n  override_reason: overrideReason || \"No override triggered\"\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        176
+      ],
+      "id": "43c64f76-3cbe-43e0-a083-4f0878168193",
+      "name": "Keyword Safety Catch",
+      "notesInFlow": true,
+      "alwaysOutputData": false,
+      "notes": "Filters email prefixes and descriptions for high-value leads might be in tier 3."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "03a74b71-ac5f-413f-a777-b000ad4498de",
+              "leftValue": "={{ $json.is_priority_override }}",
+              "rightValue": "Tier-3",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2016,
+        176
+      ],
+      "id": "9b22e105-bc6a-42ab-801e-6247252a8e52",
+      "name": "Is Priority Override?",
+      "notesInFlow": true,
+      "alwaysOutputData": false,
+      "notes": "Verifies if any lead deserves priority."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6ccd6725-59bd-441e-a816-5a60455d5a9a",
+              "name": "Lead ID",
+              "value": "={{ $('Active Leads').item.json[\"lead_id\"] }}",
+              "type": "string"
+            },
+            {
+              "id": "7db38d4c-b478-4e6f-a6b4-fc9af2939c98",
+              "name": "Email",
+              "value": "={{ $('Active Leads').item.json.email }}",
+              "type": "string"
+            },
+            {
+              "id": "c957868f-58e9-4dd1-877b-81bdab63c43d",
+              "name": "Status",
+              "value": "=WORKFLOW COMPLETED",
+              "type": "string"
+            },
+            {
+              "id": "02632ef4-592f-4537-8181-c680d9f35bf6",
+              "name": "Completed at",
+              "value": "={{ new Date().toISOString() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3264,
+        96
+      ],
+      "id": "fe6ed349-d62b-43d3-bd48-732f92acb0ef",
+      "name": "Workflow Complete",
+      "alwaysOutputData": true,
+      "notesInFlow": true,
+      "notes": "Final execution milestone."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ====================================================================\n// GENERIC OUTPUT AGGREGATOR\n// Mode: Run Once for Each Item\n// ====================================================================\n\nlet lead = {};\n\ntry {\n  lead = $('Active Leads').item.json ?? {};\n} catch (e) {\n  lead = {};\n}\n\nconst current = $json ?? {};\n\nconst aiBattlecard =\n  current.text ||\n  lead.ai_draft ||\n  \"AI Battlecard temporarily unavailable. Ready to notify\";\n\nreturn {\n  ...lead,\n  ...current,\n  ai_battlecard: String(aiBattlecard).trim()\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2816,
+        96
+      ],
+      "id": "715ef067-af63-4886-8956-5c25ecff4635",
+      "name": "Ready for notification",
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "notes": "Make it ready to notify"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a sales intelligence assistant. Use ONLY the provided lead data.\n\nLead: {{ $json.allocated_tier || 'N/A' }} — {{ $json.is_priority_override ? 'Rescued Lead' : 'Normal Lead' }}\nLead ID: {{ $json.lead_id || 'N/A' }}\nContact: {{ $json.first_name || 'N/A' }}\nEmail: {{ $json.email || 'N/A' }}\nCompany: {{ $json.company_name || 'N/A' }}\nIndustry: {{ $json.industry || 'N/A' }}\nEmployees: {{ $json.employee_count || 'N/A' }}\nRevenue: {{ $json.annual_revenue || 'N/A' }}\nFunding: {{ $json.funding_stage || 'N/A' }}\nIntent: {{ $json.intent_signal || 'N/A' }}\nCompany Description: {{ $json.company_description || 'N/A' }}\nKeywords: {{ $json.company_keywords || 'N/A' }}\nWebsite Metadata: {{ $json.raw_meta_summary || 'N/A' }}\n\nReturn exactly:\n\nSUMMARY\n• What the company does.\n• What the lead actually showed interest in.\n\nEMAIL OPENING\nWrite one natural, specific opening sentence for a sales email based on the company/website data and actual intent signal.\n\nNever invent facts, needs, or buying intent.",
+        "messages": {
+          "messageValues": []
+        },
+        "batching": {
+          "batchSize": 5,
+          "delayBetweenBatches": 1000
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        2464,
+        96
+      ],
+      "id": "2a4f8dd2-f2c7-496e-bfc4-bf081c70747d",
+      "name": "Basic LLM Chain",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "notes": "AI for battlecard"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        2536,
+        328
+      ],
+      "id": "299448a5-ecec-4c7a-aa8b-a491ddbecf11",
+      "name": "Groq Chat Model",
+      "notesInFlow": true,
+      "credentials": {
+        "groqApi": {
+          "id": "SEmiIkt7Z0XxbaZr",
+          "name": "Groq account"
+        }
+      },
+      "notes": "AI for short email"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "8fa0f6e7-9dec-4ed8-8d07-07d40cd1801f",
+              "leftValue": "=$json.intent_signal",
+              "rightValue": "sales_contact",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "040e35d6-d8e0-4911-8f5f-3eff806fc9e0",
+              "leftValue": "=$json.intent_signal",
+              "rightValue": "demo_request",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2016,
+        368
+      ],
+      "id": "5514e3b1-f5a3-4e26-b80b-c75ca4108cf1",
+      "name": "Personal Value Filter",
+      "retryOnFail": false,
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "notes": "Filter if any high value personal lead."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// =====================================================================\n// PRODUCTION PAYLOAD VERIFIER & FLATTENER — ZERO-TRUST GATE\n// Finds the required lead object anywhere inside the incoming payload.\n// =====================================================================\n\nconst REQUIRED_FIELDS = [\n  \"first_name\",\n  \"email\",\n  \"intent_signal\",\n  \"honeypot_bypass\"\n];\n\n// ---------------------------------------------------------------------\n// 1. Recursively search the ENTIRE payload for one object containing\n//    all four required fields.\n// ---------------------------------------------------------------------\n\nconst findLeadObject = (value) => {\n  if (!value || typeof value !== \"object\") return null;\n\n  if (!Array.isArray(value)) {\n    const hasAllFields = REQUIRED_FIELDS.every(\n      field => Object.prototype.hasOwnProperty.call(value, field)\n    );\n\n    if (hasAllFields) {\n      return value;\n    }\n  }\n\n  if (Array.isArray(value)) {\n    for (const item of value) {\n      const found = findLeadObject(item);\n      if (found) return found;\n    }\n  } else {\n    for (const key of Object.keys(value)) {\n      const found = findLeadObject(value[key]);\n      if (found) return found;\n    }\n  }\n\n  return null;\n};\n\nconst incomingPayload = $json;\n\nconst incoming = findLeadObject(incomingPayload);\n\nif (!incoming) {\n  throw new Error(\n    \"Validation Stopped: Required lead payload containing first_name, email, intent_signal, and honeypot_bypass was not found.\"\n  );\n}\n\n// ---------------------------------------------------------------------\n// 2. Extract ONLY the four allowed fields.\n// ---------------------------------------------------------------------\n\nconst normalize = (value) => {\n  if (value === undefined || value === null) return \"\";\n\n  return String(value)\n    .replace(/[\\r\\n\\t\\0]/g, \"\")\n    .trim();\n};\n\nconst extractedPayload = {\n  first_name: normalize(incoming.first_name),\n  email: normalize(incoming.email).toLowerCase(),\n  intent_signal: normalize(incoming.intent_signal),\n  honeypot_bypass: normalize(incoming.honeypot_bypass)\n};\n\n// =====================================================================\n// 3. EXISTING VALIDATION / BUSINESS RULES\n// =====================================================================\n\n// Required Field Check: Email\nif (extractedPayload.email.length === 0) {\n  throw new Error(\n    \"Validation Stopped: Email field is completely empty or missing.\"\n  );\n}\n\n// Required Field Check: Intent Signal\nif (extractedPayload.intent_signal.length === 0) {\n  throw new Error(\n    \"Validation Stopped: Required field 'intent_signal' is missing.\"\n  );\n}\n\n// Strict Email Regex\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n\nif (!emailRegex.test(extractedPayload.email)) {\n  throw new Error(\n    `Validation Stopped: Provided email '${extractedPayload.email}' is malformed.`\n  );\n}\n\n// Honeypot\nif (extractedPayload.honeypot_bypass.length > 0) {\n  throw new Error(\n    \"Validation Stopped: Spam bot honeypot trap field was triggered.\"\n  );\n}\n\n// First-name fallback\nif (!extractedPayload.first_name) {\n  extractedPayload.first_name =\n    extractedPayload.email.split(\"@\")[0];\n}\n\n// =====================================================================\n// 4. RETURN ONLY THE CLEAN FOUR-FIELD PAYLOAD\n// =====================================================================\n\nreturn {\n  first_name: extractedPayload.first_name,\n  email: extractedPayload.email,\n  intent_signal: extractedPayload.intent_signal,\n  honeypot_bypass: extractedPayload.honeypot_bypass\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1344,
+        288
+      ],
+      "id": "3d284196-0bd6-400f-be62-bff5146faace",
+      "name": "Payload Validation",
+      "alwaysOutputData": false,
+      "retryOnFail": false,
+      "notesInFlow": true,
+      "notes": "Validate if payload is acceptable or drop"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "//========================================================================\n// 1.CONFIGURATION \n// Select ONLY the enriched fields the client wants appended to their payload.\n//========================================================================\nconst CLIENT_CONFIG = {\n  enrichment_fields: [\n    \"company_name\",\n    \"employee_count\",\n    \"annual_revenue\",\n    \"industry\",\n    \"funding_stage\",\n    \"company_country\",\n    \"company_description\",\n    \"company_keywords\"\n  ]\n};\n\n//========================================================================\n// 2. INPUT DATA SOURCES\n//========================================================================\n\n// RAW ENRICHMENT DATA (from current node context / Apollo)\nconst rawEnrichment = $json || {};\n\n// EARLIER PAYLOAD (Hooked up from an upstream n8n node)\nlet basePayload = {};\ntry {\n  // TODO: Replace '1' or node name with your upstream lead node when ready\n  basePayload = $('Lead Registry').item.json || {};\n} catch (e) {\n  // Safe fallback if upstream node is not linked yet\n  basePayload = {};\n}\n\n// Optional Webhook source fallback for incoming leads\nlet webhookData = {};\ntry {\n  webhookData = $('Webhook Ingestion Gate').item.json || {};\n} catch (e) {\n  webhookData = {};\n}\n\n//========================================================================\n// 3. FIXED HELPERS\n//========================================================================\nconst findField = (fieldKey, fallback) => {\n  if (rawEnrichment.organization && rawEnrichment.organization[fieldKey] !== undefined && rawEnrichment.organization[fieldKey] !== null) {\n    return String(rawEnrichment.organization[fieldKey]).trim();\n  }\n  if (rawEnrichment[fieldKey] !== undefined && rawEnrichment[fieldKey] !== null) {\n    return String(rawEnrichment[fieldKey]).trim();\n  }\n  return fallback;\n};\n\nconst rawCompanyName = findField('name', '').trim();\nconst isEnrichmentValid = rawCompanyName.length > 0;\n\nconst cleanNumericString = (rawVal) => {\n  if (rawVal === undefined || rawVal === null) return \"0\";\n  const cleaned = String(rawVal).replace(/[^0-9.]/g, '');\n  return cleaned || \"0\";\n};\n\nconst getKeywordsString = () => {\n  if (!isEnrichmentValid) return \"NONE\";\n  const rawKeywords = (rawEnrichment.organization && rawEnrichment.organization.keywords) || rawEnrichment.keywords;\n  if (Array.isArray(rawKeywords)) {\n    const cleanedArray = rawKeywords.map(k => String(k).toLowerCase().trim()).filter(Boolean);\n    return cleanedArray.length > 0 ? cleanedArray.join(', ') : \"NONE\";\n  }\n  return \"NONE\";\n};\n\nconst rawIntent = basePayload.intent_signal || basePayload[\"Intent Signal\"] || webhookData.intent_signal || \"pricing_page_demo\";\nconst normalizedIntent = String(rawIntent).toLowerCase().replace(/[\\s_-]+/g, '_').trim();\n\n//========================================================================\n// 4. CORE ENGINE & FILTERING\n//========================================================================\n\n// Step A: Base core fields (Always retained)\n\nconst corePayload = {\n  lead_id: String(basePayload.lead_id || rawEnrichment.lead_id || \"\"),\n  first_name: String(basePayload.first_name || rawEnrichment.first_name || \"\"),\n  email: String(basePayload.email || rawEnrichment.email || \"\"),\n  extracted_domain: String(basePayload.extracted_domain || rawEnrichment.extracted_domain || \"\"),\n  is_enterprise_domain: (basePayload.is_enterprise_domain || rawEnrichment.is_enterprise_domain),\n  domain_system_warning: String(basePayload.domain_system_warning || \"NONE\"),\n  status: isEnrichmentValid ? (basePayload.status || \"REGISTERED\") : \"ENRICHMENT_FAILED\",\n  intent_signal: normalizedIntent\n};\n\n// Step B: Full possible enrichment pool\n\nconst availableEnrichment = {\n  company_name: isEnrichmentValid ? rawCompanyName : \"EMPTY\",\n  employee_count: isEnrichmentValid ? (parseInt(cleanNumericString(findField('estimated_num_employees', '0')), 10) || 0) : -1,\n  annual_revenue: isEnrichmentValid ? (parseFloat(cleanNumericString(findField('annual_revenue', '0'))) || 0) : -1,\n  industry: isEnrichmentValid ? findField('industry', 'EMPTY') : \"EMPTY\",\n  funding_stage: isEnrichmentValid ? findField('latest_funding_stage', 'EMPTY') : \"EMPTY\",\n  company_country: isEnrichmentValid ? findField('country', 'EMPTY') : \"EMPTY\",\n  company_description: isEnrichmentValid ? findField('seo_description', findField('short_description', 'EMPTY')) : \"EMPTY\",\n  company_keywords: getKeywordsString()\n};\n\n// Step C: Append only the client-selected fields to the core payload\nconst finalOutput = { ...corePayload };\n\nfor (const fieldKey of CLIENT_CONFIG.enrichment_fields) {\n  if (fieldKey in availableEnrichment) {\n    finalOutput[fieldKey] = availableEnrichment[fieldKey];\n  }\n}\n\nreturn finalOutput;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        96
+      ],
+      "id": "d4e125a8-c057-4210-ad5b-fa0a95367537",
+      "name": "Enrichment Contract",
+      "notesInFlow": true,
+      "alwaysOutputData": false,
+      "notes": "Standardizes B2B API responses, enforces strict numerical casting, and flattens firmographic payload keys."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "03a74b71-ac5f-413f-a777-b000ad4498de",
+              "leftValue": "={{ $json.is_enterprise_domain }}",
+              "rightValue": {},
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        0,
+        192
+      ],
+      "id": "2cc3d9b2-22b6-41ec-a3a8-6cc1c9a4c6c4",
+      "name": "Is Enterprise Domain?",
+      "notesInFlow": true,
+      "alwaysOutputData": false,
+      "notes": "Filter personal and enterprise domain"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "614c7cc4-8f37-47b9-82d7-5982493cfb27",
+              "name": "allocated_tier",
+              "value": "Personal-Tier",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1792,
+        368
+      ],
+      "id": "739e9b8c-9c36-4da2-a9bb-adf7703c6e17",
+      "name": "Edit Fields",
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "notes": "Add tier to personal leads."
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "failed_lead_registry",
+          "mode": "list",
+          "cachedResultName": "failed_lead_registry"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $json.lead_id || 'LID_FAILED_BEFORE_GEN' }}",
+            "first_name": "={{ $json.first_name || $json.body?.first_name || 'Unknown' }}",
+            "email": "={{ $json.email || $json.body?.email || 'UNKNOWN_EMAIL' }}",
+            "intent_signal": "={{ $json.intent_signal || $json.body?.intent_signal || 'UNKNOWN' }}",
+            "captured_at": "={{ $now }}",
+            "failure_reason": "={{ $error?.message || 'VALIDATION_OR_DOMAIN_FAILURE' }}",
+            "status": "FAILED REGISTRATION"
+          },
+          "matchingColumns": [
+            "lead_id"
+          ],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "first_name",
+              "displayName": "first_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "intent_signal",
+              "displayName": "intent_signal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "captured_at",
+              "displayName": "captured_at",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "failure_reason",
+              "displayName": "failure_reason",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -896,
+        384
+      ],
+      "id": "d7f90e19-b47d-454e-9d60-ae1c8d75fdd4",
+      "name": "Failed Lead Registry",
+      "alwaysOutputData": false,
+      "retryOnFail": true,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "Mjb4sJOLoy3Nap4Y",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Store every unregistered lead. (Also as backup)"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "active_leads",
+          "mode": "list",
+          "cachedResultName": "active_leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "is_priority_override": true,
+            "total_score": "={{ $json.total_lead_score || 0 }}",
+            "employee_count": "={{ $json.employee_count || 0 }}",
+            "annual_revenue": "={{ $json.annual_revenue || 0 }}",
+            "lead_id": "={{ $json.lead_id }}",
+            "first_name": "={{ $json.first_name || 'Unknown' }}",
+            "email": "={{ $json.email }}",
+            "allocated_tier": "={{ $json.allocated_tier }}",
+            "override_reason": "={{ $json.override_reason || 'No override triggered' }}",
+            "intent_signal": "={{ $json.intent_signal }}",
+            "funding_stage": "={{ $json.funding_stage || 'N/A' }}",
+            "industry": "={{ $json.industry || 'N/A' }}",
+            "timestamp": "={{ $now }}",
+            "status": "=PROCESSED ACTIVE",
+            "apollo_verification_status": "={{ $json.apollo_verification_status || 'UNKNOWN' }}",
+            "company_keywords": "={{ $json.company_keywords || 'NONE' }}",
+            "company_name": "={{ $json.company_name || 'N/A' }}",
+            "company_description": "={{ $json.company_description || 'N/A' }}",
+            "raw_meta_summary": "={{ $json.raw_meta_summary || 'N/A' }}",
+            "enrichment_source": "={{ $json.enrichment_success ? true : false }}",
+            "enrichment_success": true
+          },
+          "matchingColumns": [
+            "lead_id"
+          ],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "first_name",
+              "displayName": "first_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "allocated_tier",
+              "displayName": "allocated_tier",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "total_score",
+              "displayName": "total_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "is_priority_override",
+              "displayName": "is_priority_override",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "override_reason",
+              "displayName": "override_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "intent_signal",
+              "displayName": "intent_signal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "company_name",
+              "displayName": "company_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "employee_count",
+              "displayName": "employee_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "annual_revenue",
+              "displayName": "annual_revenue",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "funding_stage",
+              "displayName": "funding_stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "industry",
+              "displayName": "industry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "company_description",
+              "displayName": "company_description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "raw_meta_summary",
+              "displayName": "raw_meta_summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "enrichment_source",
+              "displayName": "enrichment_source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "enrichment_success",
+              "displayName": "enrichment_success",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "apollo_verification_status",
+              "displayName": "apollo_verification_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "company_keywords",
+              "displayName": "company_keywords",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2240,
+        96
+      ],
+      "id": "7278e815-1f0a-468d-ab82-ab6285af50ee",
+      "name": "Active Leads",
+      "alwaysOutputData": false,
+      "retryOnFail": true,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "Mjb4sJOLoy3Nap4Y",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Stores Tier 1 & 2, Tier 3 high priority, personal high intent leads."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// =====================================================================\n// STEP 1: PRODUCTION DOMAIN CLEANER & EMAIL NORMALIZER\n// =====================================================================\n\nconst rawEmail = $json.email ?? \"\";\nconst cleanEmail = String(rawEmail).toLowerCase().trim();\n\nconst consumerProviders = [\n  \"gmail.com\",\n  \"yahoo.com\",\n  \"hotmail.com\",\n  \"outlook.com\",\n  \"protonmail.com\",\n  \"proton.me\",\n  \"icloud.com\",\n  \"aol.com\",\n  \"zoho.com\",\n  \"yandex.com\",\n  \"mail.com\",\n  \"gmx.com\"\n];\n\n// 1. Email Existence Check\nif (cleanEmail.length === 0) {\n  throw new Error(\"Registration Failed: Inbound email field was completely empty.\");\n}\n\n// 2. Structural Email & Domain Parsing\nif (!cleanEmail.includes(\"@\")) {\n  throw new Error(\"Registration Failed: Inbound string missing '@' symbol.\");\n}\n\nconst emailParts = cleanEmail.split(\"@\");\n\nif (emailParts.length !== 2) {\n  throw new Error(\"Registration Failed: Email contains an invalid number of '@' symbols.\");\n}\n\nconst domainPart = emailParts[1].trim();\n\nif (domainPart.length === 0 || !domainPart.includes(\".\")) {\n  throw new Error(\"Registration Failed: Email domain is invalid or missing TLD.\");\n}\n\n// 3. Domain Classification\nconst extractedDomain = domainPart;\nconst isEnterpriseDomain = !consumerProviders.includes(extractedDomain);\n\n// 4. Return Normalized Payload (Clean Email + Domain Info)\nreturn {\n  ...$json,\n  email: cleanEmail,\n  extracted_domain: extractedDomain,\n  is_enterprise_domain: isEnterpriseDomain,\n  domain_system_warning: \"NONE\"\n};"
+      },
+      "id": "16a7faec-f567-4ced-8eb6-960ccf8b3971",
+      "name": "Domain Cleaner",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        288
+      ],
+      "notesInFlow": true,
+      "retryOnFail": false,
+      "alwaysOutputData": false,
+      "notes": "Separate domain and generate lead ID"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "/* ====================================================================\n   SECTION 1: INPUT MAPPING & INTENT RANKING\n   ==================================================================== */\nWITH intent_ranks AS (\n    SELECT signal_name, rank_score\n    FROM (\n        VALUES\n            ('sales_contact', 1),          -- HIGHEST INTENT\n            ('demo_request', 2),            -- MEDIUM INTENT\n            ('pricing_interest', 3),        -- LOW INTENT\n            ('product_exploration', 4),\n            ('resource_interest', 5)\n    ) AS t(signal_name, rank_score)\n),\n\nincoming_intent AS (\n    SELECT COALESCE(\n        (\n            SELECT rank_score\n            FROM intent_ranks\n            WHERE signal_name = $3\n        ),\n        1\n    ) AS current_rank\n),\n\n/* ====================================================================\n   SECTION 2: READ EXISTING STATE BEFORE WRITE\n   ==================================================================== */\nprevious_event AS (\n    SELECT\n        email,\n        last_outreach_at,\n        last_intent_rank AS previous_rank,\n        last_intent_signal AS previous_signal,\n        last_event_at,\n        total_touchpoints,\n        COALESCE(heat_score, 0) AS heat_score\n    FROM event_idempotency\n    WHERE email = $1\n),\n\n/* ====================================================================\n   SECTION 3: ATOMIC UPSERT\n   ==================================================================== */\nupserted_event AS (\n    INSERT INTO event_idempotency (\n        email,\n        last_intent_rank,\n        last_intent_signal,\n        heat_score,\n        last_outreach_at,\n        last_event_at,\n        total_touchpoints,\n        last_status,\n        last_sub_reason,\n        updated_at\n    )\n    VALUES (\n        $1,\n        (SELECT current_rank FROM incoming_intent),\n        $3,\n        0,\n\n        CASE\n            WHEN NOT EXISTS (\n                SELECT 1 FROM previous_event\n            )\n            THEN NOW()\n\n            WHEN (\n                SELECT last_outreach_at\n                FROM previous_event\n            ) IS NULL\n            OR (\n                SELECT last_outreach_at\n                FROM previous_event\n            ) < NOW() - ($2 * INTERVAL '1 day')\n            THEN NOW()\n\n            ELSE (\n                SELECT last_outreach_at\n                FROM previous_event\n            )\n        END,\n\n        NOW(),\n        1,\n        'NEW_LEAD',\n        'NEW_EMAIL',\n        NOW()\n    )\n\n    ON CONFLICT (email) DO UPDATE\n    SET\n        last_outreach_at = CASE\n            WHEN event_idempotency.last_outreach_at IS NULL\n            OR event_idempotency.last_outreach_at\n                < NOW() - ($2 * INTERVAL '1 day')\n            THEN NOW()\n\n            ELSE event_idempotency.last_outreach_at\n        END,\n\n        updated_at = NOW()\n\n    RETURNING *\n)\n\n/* ====================================================================\n   SECTION 4: RETURN GATEKEEPER METRICS TO N8N\n   ==================================================================== */\nSELECT\n    $1::text AS email,\n    $3::text AS intent_signal,\n\n    /* 1. High-level status */\n    CASE\n        WHEN NOT EXISTS (\n            SELECT 1 FROM previous_event\n        )\n        THEN 'NEW_LEAD'\n\n        WHEN (\n            SELECT last_outreach_at\n            FROM previous_event\n        ) IS NULL\n        OR (\n            SELECT last_outreach_at\n            FROM previous_event\n        ) < NOW() - ($2 * INTERVAL '1 day')\n        THEN 'COOLDOWN_EXPIRED'\n\n        ELSE 'DUPLICATE_LEAD'\n    END AS status,\n\n    /* 2. Binary gatekeeper */\n    CASE\n        WHEN NOT EXISTS (\n            SELECT 1 FROM previous_event\n        )\n        THEN TRUE\n\n        WHEN (\n            SELECT last_outreach_at\n            FROM previous_event\n        ) IS NULL\n        OR (\n            SELECT last_outreach_at\n            FROM previous_event\n        ) < NOW() - ($2 * INTERVAL '1 day')\n        THEN TRUE\n\n        ELSE FALSE\n    END AS is_new_lead,\n\n    /* 3. Sub-reason classification */\n    CASE\n        WHEN NOT EXISTS (\n            SELECT 1 FROM previous_event\n        )\n        THEN 'NEW_EMAIL'\n\n        WHEN (\n            SELECT last_outreach_at\n            FROM previous_event\n        ) IS NULL\n        OR (\n            SELECT last_outreach_at\n            FROM previous_event\n        ) < NOW() - ($2 * INTERVAL '1 day')\n        THEN 'REENGAGED'\n\n        WHEN (\n            SELECT current_rank\n            FROM incoming_intent\n        ) < (\n            SELECT previous_rank\n            FROM previous_event\n        )\n        THEN 'INTENT_UPGRADE'\n\n        ELSE 'REPEATED'\n    END AS sub_reason,\n\n    /* 4. Required state variables for downstream Code Node */\n    COALESCE(\n        (\n            SELECT previous_rank\n            FROM previous_event\n        ),\n        (\n            SELECT current_rank\n            FROM incoming_intent\n        )\n    ) AS last_intent_rank,\n\n    COALESCE(\n        (\n            SELECT previous_signal\n            FROM previous_event\n        ),\n        $3::text\n    ) AS last_intent_signal,\n\n    COALESCE(\n        (\n            SELECT heat_score\n            FROM previous_event\n        ),\n        0\n    ) AS heat_score,\n\n    (\n        SELECT last_event_at\n        FROM previous_event\n    ) AS last_event_at,\n\n    COALESCE(\n        (\n            SELECT total_touchpoints\n            FROM previous_event\n        ),\n        0\n    ) AS total_touchpoints,\n\n    /* 5. Computed velocity output */\n    CASE\n        WHEN NOT EXISTS (\n            SELECT 1 FROM previous_event\n        )\n        THEN 0\n\n        WHEN (\n            SELECT last_event_at\n            FROM previous_event\n        ) IS NULL\n        THEN 0\n\n        ELSE ROUND(\n            EXTRACT(\n                EPOCH FROM (\n                    NOW() - (\n                        SELECT last_event_at\n                        FROM previous_event\n                    )\n                )\n            )\n        )\n    END AS delta_t_seconds;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.email,\n  14,\n  $json.intent_signal\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -896,
+        192
+      ],
+      "id": "b5abecca-5e44-4a4f-bf0b-cda32cb70f9c",
+      "name": "Idempotency & Cooldown",
+      "retryOnFail": true,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "Mjb4sJOLoy3Nap4Y",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Check if lead already exist...."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cfb30620-509e-42d0-9b12-c3773ab1d1fc",
+              "leftValue": "={{ $json.is_new_lead }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -672,
+        192
+      ],
+      "id": "e5ef6a06-7705-442c-8b56-f0df287d0ddf",
+      "name": "Is new lead?",
+      "notesInFlow": true,
+      "notes": "Filtering new lead or old lead."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ====================================================================\n// LEAD FREQUENCY & INTENT ENGINE\n// ====================================================================\n// Purpose:\n//   Calculate lead heat using:\n//   1. Intent\n//   2. Event velocity\n//   3. Intent upgrades\n//   4. Accumulated heat\n//\n// IMPORTANT:\n//   Business rules live ONLY in CONFIGURATION.\n//   Do not put scoring rules elsewhere in the workflow.\n// ====================================================================\n\nconst item = $input.item.json;\n\n// ====================================================================\n// CONFIGURATION\n// ====================================================================\n// Change business rules here only.\n// ====================================================================\n\nconst config = {\n  // Events occurring faster than this are treated as\n  // bot/double-click/debounce activity.\n  debounce_seconds: 3,\n\n  // Intent matrix\n  // higher intent to lower intent \n  signal_matrix: {\n    sales_contact: {\n      rank: 1,\n      base_points: 50\n    },\n\n    demo_request: {\n      rank: 2,\n      base_points: 40\n    },\n\n    pricing_interest: {\n      rank: 3,\n      base_points: 30\n    },\n\n    product_exploration: {\n      rank: 3,\n      base_points: 20\n    },\n\n    resource_interest: {\n      rank: 3,\n      base_points: 10\n    },\n    \n  },\n\n  // Velocity scoring\n  velocity_thresholds: [\n    {\n      max_seconds: 900,       // 15 minutes\n      multiplier: 1.5\n    },\n    {\n      max_seconds: 86400,     // 24 hours\n      multiplier: 1.2\n    },\n    {\n      max_seconds: null,      // anything beyond 24 hours\n      multiplier: 1.0\n    }\n  ],\n\n  // Intent upgrade bonus\n  surge_bonus_points: 20,\n\n  // Heat classification\n  heat_thresholds: {\n    warm_min: 26,\n    hot_min: 51,\n    hottest_min: 81\n  }\n};\n\n\n// ====================================================================\n// SECTION 1: VALIDATE INPUT\n// ====================================================================\n\nconst email = item.email;\n\nif (!email) {\n  throw new Error('Lead Frequency Engine: missing email');\n}\n\nconst incomingSignal = item.intent_signal;\n\nif (!incomingSignal) {\n  throw new Error('Lead Frequency Engine: missing intent_signal');\n}\n\n\n// ====================================================================\n// SECTION 2: RESOLVE CURRENT INTENT\n// ====================================================================\n\nconst signalConfig = config.signal_matrix[incomingSignal];\n\nif (!signalConfig) {\n  throw new Error(\n    `Lead Frequency Engine: unknown intent_signal \"${incomingSignal}\"`\n  );\n}\n\nconst currentRank = Number(signalConfig.rank);\nconst basePoints = Number(signalConfig.base_points);\n\n\n// ====================================================================\n// SECTION 3: READ PREVIOUS DB STATE\n// ====================================================================\n\nconst previousRank = Number(\n  item.last_intent_rank ?? currentRank\n);\n\nconst previousScore = Number(\n  item.heat_score ?? 0\n);\n\nconst previousTouchpoints = Number(\n  item.total_touchpoints ?? 0\n);\n\n\n// ====================================================================\n// SECTION 4: CALCULATE EVENT VELOCITY\n// ====================================================================\n//\n// Delta T = NOW - last_event_at\n//\n// < 3 seconds       → 0.0x\n// 3 sec–15 minutes  → 1.5x\n// >15 min–24 hours  → 1.2x\n// >24 hours         → 1.0x\n//\n// ====================================================================\n\nconst nowMs = Date.now();\n\nlet deltaTSeconds = 0;\n\nif (item.last_event_at) {\n\n  const lastEventMs = new Date(item.last_event_at).getTime();\n\n  if (!Number.isNaN(lastEventMs)) {\n\n    deltaTSeconds = Math.max(\n      0,\n      Math.floor((nowMs - lastEventMs) / 1000)\n    );\n\n  }\n}\n\n\n// Resolve velocity multiplier from configuration.\nconst velocityRule = config.velocity_thresholds.find(rule => {\n\n  return (\n    rule.max_seconds === null ||\n    deltaTSeconds <= Number(rule.max_seconds)\n  );\n\n});\n\nif (!velocityRule) {\n  throw new Error(\n    `Lead Frequency Engine: no velocity rule matched delta_t_seconds=${deltaTSeconds}`\n  );\n}\n\nconst velocityMultiplier =\n  deltaTSeconds < config.debounce_seconds\n    ? 0\n    : Number(velocityRule.multiplier);\n\n\n// ====================================================================\n// SECTION 5: INTENT SURGE\n// ====================================================================\n//\n// Rank 1 = highest intent.\n//\n// Therefore:\n//\n// 3 → 2 = upgrade\n// 3 → 1 = upgrade\n// 2 → 1 = upgrade\n//\n// Formula:\n//\n// Delta R = previousRank - currentRank\n//\n// If Delta R > 0 → intent upgraded → +20\n//\n// ====================================================================\n\nconst deltaRank = previousRank - currentRank;\n\nconst isIntentUpgrade = deltaRank > 0;\n\nconst surgeBonus = isIntentUpgrade\n  ? Number(config.surge_bonus_points)\n  : 0;\n\n\n// ====================================================================\n// SECTION 6: CALCULATE EARNED POINTS\n// ====================================================================\n\nconst earnedPoints = Math.round(\n  (basePoints * velocityMultiplier) +\n  surgeBonus\n);\n\n\n// ====================================================================\n// SECTION 7: ACCUMULATE HEAT\n// ====================================================================\n\nconst newHeatScore =\n  previousScore + earnedPoints;\n\n\n// ====================================================================\n// SECTION 8: CLASSIFY HEAT\n// ====================================================================\n\nlet heatTag;\n\nif (\n  newHeatScore >=\n  Number(config.heat_thresholds.hottest_min)\n) {\n\n  heatTag = 'HOTTEST';\n\n} else if (\n  newHeatScore >=\n  Number(config.heat_thresholds.hot_min)\n) {\n\n  heatTag = 'HOT';\n\n} else if (\n  newHeatScore >=\n  Number(config.heat_thresholds.warm_min)\n) {\n\n  heatTag = 'WARM';\n\n} else {\n\n  heatTag = 'COLD';\n\n}\n\n\n// ====================================================================\n// SECTION 9: RETURN ENGINE RESULT\n// ====================================================================\n\nreturn {\n  email,\n\n  intent_signal: incomingSignal,\n\n  current_rank: currentRank,\n  previous_rank: previousRank,\n  delta_rank: deltaRank,\n  is_intent_upgrade: isIntentUpgrade,\n\n  base_points: basePoints,\n\n  delta_t_seconds: deltaTSeconds,\n  velocity_multiplier: velocityMultiplier,\n\n  surge_bonus: surgeBonus,\n\n  earned_points: earnedPoints,\n\n  previous_heat_score: previousScore,\n  new_heat_score: newHeatScore,\n\n  heat_tag: heatTag,\n\n  previous_touchpoints: previousTouchpoints,\n  updated_touchpoints: previousTouchpoints + 1\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        528
+      ],
+      "id": "a2673b3f-9acb-4503-90b1-5d080bf7f949",
+      "name": "Leads Frequency Scoring",
+      "notesInFlow": true,
+      "notes": "Score the frequency of lead"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE event_idempotency\nSET \n    total_touchpoints = $2,\n    last_event_at = NOW(),\n    last_intent_signal = $3,\n    last_intent_rank = $4,\n    heat_score = $5,\n    last_status = $6,\n    last_sub_reason = $7,\n    updated_at = NOW()\nWHERE email = $1\nRETURNING \n    $1 AS email,\n    $3 AS intent_signal,\n    $4 AS current_rank,\n    $5 AS new_heat_score,\n    $6 AS heat_tag,\n    $7 AS action,\n    true AS is_surge,\n    $2 AS updated_touchpoints;",
+        "options": {
+          "queryReplacement": "={{ [   $json.email,    $json.updated_touchpoints,    $json.intent_signal,    $json.current_rank,    $json.new_heat_score,    $json.heat_tag,   $json.action ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -224,
+        528
+      ],
+      "id": "bddd7468-61d2-456b-948d-0adf982a13df",
+      "name": "Update DB Idempotency",
+      "retryOnFail": true,
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "Mjb4sJOLoy3Nap4Y",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Update DB if lead already exist..."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// 1. Grab data from Domain Cleaner and the incoming item\nconst domainCleanerData = $('Domain Cleaner').item.json;\nconst item = $input.item.json;\n\n// 2. High-entropy Unique ID Generator\nconst timePart = Date.now().toString(36).toUpperCase();\nconst indexPart = ($itemIndex ?? 0).toString(36).toUpperCase();\nconst randomPart = Math.random().toString(36).substring(2, 6).toUpperCase();\n\nconst generatedLeadId = `LID_${timePart}_${indexPart}_${randomPart}`;\n\n// 3. Merge everything into a SINGLE flat object\nreturn {\n  lead_id: generatedLeadId,\n  ...domainCleanerData, // Passes all 7 fields from Domain Cleaner\n  ...item               // Preserves any Idempotency metadata\n   // Appends the new Lead ID\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        96
+      ],
+      "id": "256d901c-3e83-4287-8fa0-3748ad357687",
+      "name": "Gen ID",
+      "notesInFlow": true,
+      "notes": "Generate unique ID for new leads giving them identity."
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $('Lead Registry').item.json.extracted_domain }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        896,
+        192
+      ],
+      "id": "177643b5-fbd8-44db-8585-b2097600543c",
+      "name": "Metadata Scrapper Request",
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Fetch domain HTML as a fallback for apollo enrichment."
+    },
+    {
+      "parameters": {
+        "url": "https://api.apollo.io/api/v1/organizations/enrich",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "domain",
+              "value": "={{ $json.extracted_domain }}"
+            },
+            {
+              "name": "email",
+              "value": "={{ $json.email }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Cache-Control",
+              "value": "no-cache"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "=PUT API KEY HERE"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        224,
+        96
+      ],
+      "id": "4067b2e8-755d-41b7-82e8-f09739c6df20",
+      "name": "Apollo Enrichment Request",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "notes": "Apollo.io Enrichment"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "fa0eeda1-a5ef-4577-9142-326a62d033e0",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "ENRICHMENT_FAILED",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        672,
+        96
+      ],
+      "id": "c53d0779-09a8-4ef0-aabd-638784cc1fd2",
+      "name": "Is Enriched?",
+      "notesInFlow": true,
+      "notes": "Enrichment worked or fallback path"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ====================================================================\n// UNIFIED ENGINE: META TAG EXTRACTION & CONTEXT NORMALIZATION\n// ====================================================================\nconst item = $input.item?.json || $json || {};\n\n// Safely detect error payload from n8n HTTP node\nconst isHttpError = Boolean(item && (item.error || item.code === 'ENOTFOUND' || (item.statusCode && item.statusCode >= 400)));\nconst rawHtml = isHttpError ? '' : String(item.data || item.body || item.html || '');\n\n// 1. SAFELY RECOVER UPSTREAM IDENTITY & PRIMARY KEYS USING STRING LITERALS\nconst getUpstreamField = (fieldName, fallbackVal = '') => {\n  // Check current payload first\n  if (item[fieldName] !== undefined && item[fieldName] !== null && item[fieldName] !== '') {\n    return item[fieldName];\n  }\n  \n  // Explicit string literals so n8n can optimize runtime execution\n  try {\n    const lr = $('Lead Registry').first()?.json;\n    if (lr && lr[fieldName] !== undefined && lr[fieldName] !== null && lr[fieldName] !== '') return lr[fieldName];\n  } catch (e) {}\n\n  try {\n    const dc = $('Domain Cleaner').first()?.json;\n    if (dc && dc[fieldName] !== undefined && dc[fieldName] !== null && dc[fieldName] !== '') return dc[fieldName];\n  } catch (e) {}\n\n  try {\n    const wig = $('Webhook Ingestion Gate').first()?.json;\n    if (wig && wig[fieldName] !== undefined && wig[fieldName] !== null && wig[fieldName] !== '') return wig[fieldName];\n  } catch (e) {}\n\n  return fallbackVal;\n};\n\nconst leadId = getUpstreamField('lead_id', 'LID_UNKNOWN');\nconst email = getUpstreamField('email', 'unknown@domain.com');\nconst firstName = getUpstreamField('first_name', 'Lead');\nconst intentSignal = getUpstreamField('intent_signal', 'demo_request');\nconst extractedDomain = getUpstreamField('extracted_domain', getUpstreamField('domain', ''));\n\n// 2. REGEX PARSING FOR META CONTENT\nconst getMetaContent = (html, property) => {\n  if (!html) return null;\n  const regex = new RegExp(`<meta[^>]*(?:name|property)=[\"']${property}[\"'][^>]*content=[\"']([^\"']*)[\"']`, 'i');\n  const match = html.match(regex);\n  return match ? match[1].trim() : null;\n};\n\nlet pageTitle = null;\nif (rawHtml) {\n  const titleMatch = rawHtml.match(/<title[^>]*>([^<]*)<\\/title>/i);\n  if (titleMatch) pageTitle = titleMatch[1].trim();\n}\n\nconst metaDescription = getMetaContent(rawHtml, 'description') || getMetaContent(rawHtml, 'og:description');\nconst metaKeywords = getMetaContent(rawHtml, 'keywords');\nconst siteName = getMetaContent(rawHtml, 'og:site_name');\n\n// 3. CONSTRUCT CONTEXT SUMMARY & RESOLVE FIELDS\nconst fallbackContext = [\n  pageTitle ? `Title: ${pageTitle}` : '',\n  metaDescription ? `Description: ${metaDescription}` : '',\n  metaKeywords ? `Keywords: ${metaKeywords}` : ''\n].filter(Boolean).join(' | ');\n\nconst resolvedName = siteName || (extractedDomain ? extractedDomain.split('.')[0].toUpperCase() : 'UNKNOWN_SCRAPED');\n\n// Extract clean error string safely\nlet errDetails = 'Host offline or blocked';\nif (isHttpError && item.error) {\n  errDetails = typeof item.error === 'string' ? item.error : (item.error.message || errDetails);\n}\nconst resolvedDesc = isHttpError \n  ? `Scrape Unreachable: ${errDetails}` \n  : (metaDescription || pageTitle || 'No site metadata available');\n\n// ====================================================================\n// RETURN STANDARDIZED PAYLOAD FOR SCORING & DB MAPPER\n// ====================================================================\nreturn {\n  // Guaranteed Core Database Identifiers\n  lead_id: leadId,\n  email: email,\n  first_name: firstName,\n  intent_signal: intentSignal,\n  extracted_domain: extractedDomain,\n\n  // Scraped Metadata / Error Fallbacks\n  company_name: resolvedName,\n  company_description: resolvedDesc,\n  company_keywords: metaKeywords || 'NONE',\n  raw_meta_summary: fallbackContext || (isHttpError ? 'Site offline or scraping failed' : 'Direct site lookup yielded no meta tags'),\n  enrichment_success: false,\n\n  // Deterministic Scoring Normalization\n  annual_revenue: 0,\n  employee_count: 0,\n  funding_stage: \"bootstrapped\",\n  status: \"WEB_ENRICHED\",\n  enrichment_source: isHttpError ? \"META_SCRAPER_FAILED\" : \"META_SCRAPER\"\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        192
+      ],
+      "id": "a8ec63a4-3ad5-403e-bd15-ffbcdeac31e2",
+      "name": "Extract Meta Tags & context normalizer",
+      "notesInFlow": true,
+      "notes": "Meta data extraction & baseline normalization."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=INCOMING WEBHOOK SLACK URL",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"🎯 *{{ String($json.allocated_tier || 'N/A').toUpperCase() }} LEAD*\\n\\n*Company:* {{ $json.company_name || 'N/A' }}\\n*Contact:* {{ ($json.first_name || 'N/A').trim() }}\\n*Email:* {{ $json.email || 'N/A' }}\\n*Intent:* {{ $json.intent_signal || 'N/A' }}\\n*Score:* {{ $json.total_score ?? 'N/A' }}\\n\\n{{ $json.is_priority_override ? '⚡ *RESCUED LEAD:* ' + ($json.override_reason || 'Priority override triggered') + '\\\\n\\\\n' : '' }}📝 *Sales Brief:*\\n{{ $json.ai_draft || 'AI Battlecard temporarily unavailable. Check AI node.' }}\\n*Lead ID:* {{ $json.lead_id || 'N/A' }}\"\n}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3040,
+        96
+      ],
+      "id": "07943336-9dbb-4da7-a8c1-d2d6865a0cdd",
+      "name": "Slack notification (Tier based)",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "alwaysOutputData": false,
+      "notes": "To send notification (Tier based)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=INCOMING WEBHOOK SLACK URL",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"🔥 *LEAD RE-ENGAGEMENT*\\n\\n*Contact:* {{ $json.first_name || 'N/A' }}\\n*Email:* {{ $json.email || 'N/A' }}\\n*Intent:* {{ $json.intent_signal || 'N/A' }}\\n*Touchpoints:* {{ $json.updated_touchpoints ?? $json.total_touchpoints ?? 'N/A' }}\\n*Heat:* {{ $json.new_heat_score ?? $json.heat_score ?? 'N/A' }} — {{ $json.heat_tag || 'N/A' }}\\n\\n{{ $json.is_intent_upgrade ? '⬆️ Intent upgraded.' : '↩️ New tracked interaction.' }}\\n\\n👉 Review and consider follow-up.\"\n}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        448,
+        528
+      ],
+      "id": "be4a0177-dd07-4b44-9877-490aca65f256",
+      "name": "Slack notification (Frequency based)",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "alwaysOutputData": false,
+      "notes": "To send notification (Frequency based)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "97a091bd-2cf8-4b74-a084-1927dd1090d2",
+              "leftValue": "={{ $('Update DB Idempotency').item.json.is_surge }}",
+              "rightValue": 3,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": true
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        0,
+        528
+      ],
+      "id": "45ba25e0-7482-4aa4-b3cd-0856fcb67682",
+      "name": "Is Frequency Surge?",
+      "notesInFlow": true,
+      "notes": "Seek for change in frequency of leads"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "list",
+          "value": "lead_registry"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "is_enterprise_domain": "={{ $json.is_enterprise_domain }}",
+            "lead_id": "={{ $json.lead_id }}",
+            "first_name": "={{ $json.first_name || 'Unknown' }}",
+            "intent_signal": "={{ $json.intent_signal }}",
+            "email": "={{ $json.email }}",
+            "honeypot_bypass": "={{ $json.honeypot_bypass }}",
+            "domain_system_warning": "={{ $json.domain_system_warning }}",
+            "extracted_domain": "={{ $json.extracted_domain }}",
+            "captured_at": "={{ $now }}",
+            "status": "=REGISTERED"
+          },
+          "matchingColumns": [
+            "lead_id"
+          ],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "first_name",
+              "displayName": "first_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "intent_signal",
+              "displayName": "intent_signal",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "honeypot_bypass",
+              "displayName": "honeypot_bypass",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "extracted_domain",
+              "displayName": "extracted_domain",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "is_enterprise_domain",
+              "displayName": "is_enterprise_domain",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "domain_system_warning",
+              "displayName": "domain_system_warning",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "captured_at",
+              "displayName": "captured_at",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -224,
+        96
+      ],
+      "id": "6fa80c79-cc59-40f3-b4d8-42213d72360f",
+      "name": "Lead Registry",
+      "retryOnFail": true,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "Mjb4sJOLoy3Nap4Y",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Store every registered lead. (Also as backup)"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "archived_leads",
+          "mode": "list",
+          "cachedResultName": "archived_leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $json.lead_id }}",
+            "first_name": "={{ $json.first_name || 'Unknown' }}",
+            "email": "={{ $json.email }}",
+            "allocated_tier": "={{ $json.allocated_tier }}",
+            "intent_signal": "={{ $json.intent_signal }}",
+            "company_name": "={{ $json.company_name || 'N/A' }}",
+            "timestamp": "={{ $now }}",
+            "status": "={{ $json.routing_destination || 'LOW_TIER_ARCHIVE' }}",
+            "total_score": "= {{ $json.total_lead_score || 0 }}",
+            "enrichment_source": "={{ $json.enrichment_source || 'UNKNOWN' }}",
+            "override_reason": "={{ $json.override_reason || 'No override triggered' }}"
+          },
+          "matchingColumns": [
+            "lead_id"
+          ],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "first_name",
+              "displayName": "first_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "allocated_tier",
+              "displayName": "allocated_tier",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "total_score",
+              "displayName": "total_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "override_reason",
+              "displayName": "override_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "intent_signal",
+              "displayName": "intent_signal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "company_name",
+              "displayName": "company_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "enrichment_source",
+              "displayName": "enrichment_source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2240,
+        320
+      ],
+      "id": "9bcc8efb-27ec-40f1-ab22-be8e425291f1",
+      "name": "Archived leads",
+      "alwaysOutputData": false,
+      "retryOnFail": true,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "Mjb4sJOLoy3Nap4Y",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Stores Tier 3 low intent, personal low intent leads."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ====================================================================\n// MULTI-NODE OUTPUT AGGREGATOR\n// Mode: Run Once for Each Item\n// ====================================================================\n\nconst current = $json ?? {};\n\nconst payload = $('Domain Cleaner').item.json ?? {};\nconst I_D = $('Idempotency & Cooldown').item.json ?? {};\nconst scored = $('Leads Frequency Scoring').item.json ?? {};\n\nreturn {\n  ...payload,\n  ...I_D,\n  ...scored,\n  ...current\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        528
+      ],
+      "id": "f0211cae-fecc-41f0-9dc1-8be7323bf3b0",
+      "name": "Ready to notify",
+      "notesInFlow": true,
+      "notes": "Make it ready to notify"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1568,
+        752
+      ],
+      "id": "87a993a0-d5b8-433a-a1fd-2dfb2fc6ba47",
+      "name": "Error Trigger",
+      "retryOnFail": false,
+      "executeOnce": false,
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO failed_lead_registry (\n  lead_id,\n  first_name,\n  email,\n  intent_signal,\n  captured_at,\n  failure_reason,\n  status\n) VALUES (\n  $1, $2, $3, $4, $5, $6, $7\n)\nON CONFLICT (lead_id) DO UPDATE SET\n  failure_reason = EXCLUDED.failure_reason,\n  status = EXCLUDED.status;",
+        "options": {
+          "queryReplacement": "={{ [   $json.lead_id,    $json.first_name,    $json.email,    $json.intent_signal,    $json.captured_at,    $json.failure_reason,   $json.status ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1120,
+        752
+      ],
+      "id": "5abf972d-0360-4442-adca-be45c8386bc4",
+      "name": "failed_lead_registry",
+      "retryOnFail": true,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "Mjb4sJOLoy3Nap4Y",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Register in failed_lead_registry DB."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ====================================================================\n// SYSTEM ERROR HANDLER NODE — ERROR SANITIZER\n// Handles both lead-processing failures and system-only failures.\n// ====================================================================\n\nconst errorData = $input.first()?.json || {};\n\nconst execution = errorData.execution || {};\nconst lastError = execution.error || errorData.error || {};\nconst originalData =\n  errorData.data ||\n  errorData.item?.json ||\n  {};\n\nconst nodeInfo =\n  typeof lastError.node === 'object' &&\n  lastError.node !== null\n    ? lastError.node\n    : typeof errorData.node === 'object' &&\n      errorData.node !== null\n      ? errorData.node\n      : {};\n\nconst captureTimestamp = new Date().toISOString();\n\nconst fallbackId = `LID_CRASH_${execution.id || Date.now()}`;\n\nconst resolvedLeadId = String(\n  originalData.lead_id ||\n  originalData.body?.lead_id ||\n  fallbackId\n);\n\nconst workflowName = String(\n  errorData.workflow?.name ||\n  'Lead Engine Workflow'\n);\n\nconst failedNodeName = String(\n  nodeInfo.name ||\n  (typeof lastError.node === 'string'\n    ? lastError.node\n    : '') ||\n  (typeof errorData.node === 'string'\n    ? errorData.node\n    : '') ||\n  'Unknown Node'\n);\n\nconst rawErrorMessage = String(\n  lastError.message ||\n  errorData.message ||\n  'SYSTEM_CRASH_UNHANDLED'\n);\n\nreturn [\n  {\n    json: {\n      // Lead context — available when the failure occurred\n      lead_id: resolvedLeadId,\n\n      first_name: String(\n        originalData.first_name ||\n        originalData.body?.first_name ||\n        'Unknown'\n      ),\n\n      email: String(\n        originalData.email ||\n        originalData.body?.email ||\n        'UNKNOWN_EMAIL'\n      ),\n\n      intent_signal: String(\n        originalData.intent_signal ||\n        originalData.body?.intent_signal ||\n        'UNKNOWN'\n      ),\n\n      // System error context\n      workflow_name: workflowName,\n      failed_node: failedNodeName,\n      error_message: rawErrorMessage,\n      execution_id: String(execution.id || 'N/A'),\n      captured_at: captureTimestamp,\n\n      // Complete database record\n      failure_reason:\n        `${workflowName} - Node: [${failedNodeName}] - ${rawErrorMessage}`,\n\n      status: 'SYSTEM_EXECUTION_FAILURE'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1344,
+        752
+      ],
+      "id": "90603ee3-5008-4cfb-ac02-b5b74b76b754",
+      "name": "Format Error Payload",
+      "notesInFlow": true,
+      "onError": "continueErrorOutput",
+      "notes": "Map all crash errors"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=INCOMING WEBHOOK SLACK URL",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"🚨 *LEAD ENGINE — EXECUTION ERROR*\\n\\n*Workflow:* {{ $json.workflow_name || 'Lead Engine Workflow' }}\\n*Failed Node:* {{ $json.failed_node || 'Unknown Node' }}\\n\\n❌ *Error:* {{ $json.error_message || 'SYSTEM_EXECUTION_FAILURE' }}\\n\\n*Lead Context:*\\n• Lead ID: {{ $json.lead_id || 'N/A' }}\\n• Email: {{ $json.email || 'N/A' }}\\n• Intent: {{ $json.intent_signal || 'N/A' }}\\n\\n⏱️ *Time:* {{ $json.captured_at || 'N/A' }}\\n\\n⚠️ *Action Required:* Investigate the failed node and error above.\\n\\n*Status:* SYSTEM_EXECUTION_FAILURE\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -672,
+        752
+      ],
+      "id": "4ff229f5-cce5-4ced-aed6-209f31ec6ef6",
+      "name": "Slack notification (errors)",
+      "retryOnFail": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ====================================================================\n// MULTI-NODE OUTPUT AGGREGATOR\n// Mode: Run Once for Each Item\n// ====================================================================\n\nconst current = $json ?? {};\n\nconst errorpayload = $('Format Error Payload').item.json ?? {};\nconst failedleadregistry = $('failed_lead_registry').item.json ?? {};\n\nreturn {\n  ...errorpayload,\n  ...failedleadregistry,\n  ...current\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        752
+      ],
+      "id": "bd87f416-a351-4aaa-a70a-228b0b1141d6",
+      "name": "Ready to notify (error)",
+      "notesInFlow": true,
+      "onError": "continueErrorOutput",
+      "notes": "Make it ready to notify"
+    }
+  ],
+  "connections": {
+    "Webhook Ingestion Gate": {
+      "main": [
+        [
+          {
+            "node": "Payload Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deterministic Scoring": {
+      "main": [
+        [
+          {
+            "node": "Is High Tier?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is High Tier?": {
+      "main": [
+        [
+          {
+            "node": "Active Leads",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Keyword Safety Catch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keyword Safety Catch": {
+      "main": [
+        [
+          {
+            "node": "Is Priority Override?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Priority Override?": {
+      "main": [
+        [
+          {
+            "node": "Active Leads",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Archived leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ready for notification": {
+      "main": [
+        [
+          {
+            "node": "Slack notification (Tier based)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Ready for notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Personal Value Filter": {
+      "main": [
+        [
+          {
+            "node": "Active Leads",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Archived leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Payload Validation": {
+      "main": [
+        [
+          {
+            "node": "Domain Cleaner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrichment Contract": {
+      "main": [
+        [
+          {
+            "node": "Is Enriched?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Enterprise Domain?": {
+      "main": [
+        [
+          {
+            "node": "Apollo Enrichment Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Personal Value Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Failed Lead Registry": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook (500 Error)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Active Leads": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Domain Cleaner": {
+      "main": [
+        [
+          {
+            "node": "Idempotency & Cooldown",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Failed Lead Registry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Idempotency & Cooldown": {
+      "main": [
+        [
+          {
+            "node": "Is new lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is new lead?": {
+      "main": [
+        [
+          {
+            "node": "Gen ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Leads Frequency Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leads Frequency Scoring": {
+      "main": [
+        [
+          {
+            "node": "Update DB Idempotency",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update DB Idempotency": {
+      "main": [
+        [
+          {
+            "node": "Is Frequency Surge?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gen ID": {
+      "main": [
+        [
+          {
+            "node": "Lead Registry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Metadata Scrapper Request": {
+      "main": [
+        [
+          {
+            "node": "Extract Meta Tags & context normalizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo Enrichment Request": {
+      "main": [
+        [
+          {
+            "node": "Enrichment Contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Enriched?": {
+      "main": [
+        [
+          {
+            "node": "Deterministic Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Metadata Scrapper Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Meta Tags & context normalizer": {
+      "main": [
+        [
+          {
+            "node": "Deterministic Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack notification (Tier based)": {
+      "main": [
+        [
+          {
+            "node": "Workflow Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Frequency Surge?": {
+      "main": [
+        [
+          {
+            "node": "Ready to notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Registry": {
+      "main": [
+        [
+          {
+            "node": "Is Enterprise Domain?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond to Webhook (202 Accepted)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ready to notify": {
+      "main": [
+        [
+          {
+            "node": "Slack notification (Frequency based)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "failed_lead_registry": {
+      "main": [
+        [
+          {
+            "node": "Ready to notify (error)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Payload": {
+      "main": [
+        [
+          {
+            "node": "failed_lead_registry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ready to notify (error)": {
+      "main": [
+        [
+          {
+            "node": "Slack notification (errors)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "2564365201620fae9e00ee06608d968c1be1da6836714e41531ac310029636a5"
+  }
+}

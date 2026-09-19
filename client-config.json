@@ -1,0 +1,155 @@
+{
+  "client_info": {
+    "name": "Lead Engine Workflow v1",
+    "clientId": "VORTEXOPS_SANDBOX",
+    "script_version": "1.0",
+    "storageKey": "lead_identity_v1",
+    "webhook_url": "http://localhost:5678/webhook/lead-ingest"
+  },
+  "dom_tracking": {
+    "identity": {
+      "emailSelector": "input[type='email']"
+    },
+    "signals": {
+      "product_exploration": [
+        "div.container.announcement-inner > a",
+        "section#platform > div.container > div.feature-grid > article.feature-card > a.link-arrow",
+        "section#workflow > div.container > div.workflow-wrap > div.workflow-list > button.workflow-step",
+        "div.container.footer-top > div:nth-of-type(1) > a.brand"
+      ],
+      "demo_request": [
+        "div.container.nav > a.brand",
+        "div.nav-actions > button.btn.btn-primary",
+        "div.container.hero-grid > div:nth-of-type(1) > div.hero-actions > button.btn.btn-primary",
+        "a.btn",
+        "div#demo > div:nth-of-type(1) > div.hero-actions > button.btn.btn-primary",
+        "footer > div.container.footer-top > div.footer-col > a:nth-of-type(1)",
+        "footer > div.container.footer-top > div.footer-col > a:nth-of-type(2)",
+        "footer > div.container.footer-top > div.footer-col > a:nth-of-type(3)",
+        "footer > div.container.footer-top > div.footer-col > a:nth-of-type(4)"
+      ],
+      "sales_contact": [
+        "button.pricing-button-tier2",
+        "section#pricing > div.container > div.pricing-grid > article.pricing-card > button.btn.btn-secondary"
+      ],
+      "resource_interest": [
+        "button.btn.btn-primary.download-btn",
+        "section#resources > div.container > div.resource-grid > article.resource-card > div.resource-actions > button.btn.btn-secondary",
+        "button.btn.btn-secondary.download-btn",
+        "button.btn.btn-secondary.btn-lg"
+      ],
+      "pricing_interest": [
+        "footer > div.container.footer-top > div.footer-col > a:nth-of-type(1)",
+        "footer > div.container.footer-top > div.footer-col > a:nth-of-type(2)",
+        "footer > div.container.footer-top > div.footer-col > a:nth-of-type(3)",
+        "footer > div.container.footer-top > div.footer-col > a:nth-of-type(4)"
+      ]
+    }
+  },
+  "enrichment_contract": {
+    "fields": [
+      "company_name",
+      "employee_count",
+      "annual_revenue",
+      "industry",
+      "funding_stage",
+      "company_country",
+      "company_description",
+      "company_keywords"
+    ]
+  },
+  "deterministic_scoring": {
+    "ranges": {
+      "revenue": { "min": 0, "max": 10000000, "weight": 40 },
+      "employees": { "min": 0, "max": 500, "weight": 30 }
+    },
+    "weights": {
+      "funding": {
+        "public": 15,
+        "ipo": 15,
+        "series d": 15,
+        "series c": 15,
+        "series b": 12,
+        "series a": 10,
+        "seed": 5,
+        "bootstrapped": 2
+      },
+      "intent": {
+        "sales_contact": 50,
+        "demo_request": 40,
+        "pricing_interest": 30,
+        "product_exploration": 20,
+        "resource_interest": 10
+      }
+    },
+    "tierThresholds": {
+      "Tier_1": 55,
+      "Tier_2": 20
+    },
+    "intentOverrides": [
+      "sales_contact",
+      "demo_request"
+    ]
+  },
+  "safety_config": {
+    "companyKeywords": [
+      "venture", "fund", "incubator", "accelerator", "artificial intelligence",
+      "startup", "defense", "military", "aerospace", "quantum", "enterprise"
+    ],
+    "executiveHandles": [
+      "ceo", "founder", "cofounder", "co-founder", "partner", "director", "owner"
+    ],
+    "rescueFundingStages": [
+      "series b", "series c", "public"
+    ]
+  },
+  "frequency_scoring": {
+    "debounce_seconds": 3,
+    "surge_bonus_points": 20,
+    "signal_matrix": {
+      "sales_contact": { "rank": 1, "base_points": 50 },
+      "demo_request": { "rank": 2, "base_points": 40 },
+      "pricing_interest": { "rank": 3, "base_points": 30 },
+      "product_exploration": { "rank": 3, "base_points": 20 },
+      "resource_interest": { "rank": 3, "base_points": 10 }
+    },
+    "velocity_thresholds": [
+      { "max_seconds": 900, "multiplier": 1.5 },
+      { "max_seconds": 86400, "multiplier": 1.2 },
+      { "max_seconds": null, "multiplier": 1.0 }
+    ],
+    "heat_thresholds": {
+      "warm_min": 26,
+      "hot_min": 51,
+      "hottest_min": 81
+    }
+  },
+  "idempotency": {
+    "cooldown_window_days": 14,
+    "personal_value_filter": [
+      "sales_contact",
+      "demo_request"
+    ],
+    "intent_ranks": [
+      { "signal_name": "sales_contact", "rank_score": 1 },
+      { "signal_name": "demo_request", "rank_score": 2 },
+      { "signal_name": "pricing_interest", "rank_score": 3 },
+      { "signal_name": "product_exploration", "rank_score": 4 },
+      { "signal_name": "resource_interest", "rank_score": 5 }
+    ]
+  },
+  "ai_generation": {
+    "prompt_template": "You are a sales intelligence assistant. Use ONLY the provided lead data.\n\nLead: {{ $json.allocated_tier || 'N/A' }} — {{ $json.is_priority_override ? 'Rescued Lead' : 'Normal Lead' }}\nLead ID: {{ $json.lead_id || 'N/A' }}\nContact: {{ $json.first_name || 'N/A' }}\nEmail: {{ $json.email || 'N/A' }}\nCompany: {{ $json.company_name || 'N/A' }}\nIndustry: {{ $json.industry || 'N/A' }}\nEmployees: {{ $json.employee_count || 'N/A' }}\nRevenue: {{ $json.annual_revenue || 'N/A' }}\nFunding: {{ $json.funding_stage || 'N/A' }}\nIntent: {{ $json.intent_signal || 'N/A' }}\nCompany Description: {{ $json.company_description || 'N/A' }}\nKeywords: {{ $json.company_keywords || 'N/A' }}\nWebsite Metadata: {{ $json.raw_meta_summary || 'N/A' }}\n\nReturn exactly:\n\nSUMMARY\n• What the company does.\n• What the lead actually showed interest in.\n\nEMAIL OPENING\nWrite one natural, specific opening sentence for a sales email based on the company/website data and actual intent signal.\n\nNever invent facts, needs, or buying intent."
+  },
+  "slack_notifications": {
+    "tier_based": {
+      "text": "🎯 *{{ String($json.allocated_tier || 'N/A').toUpperCase() }} LEAD*\n\n*Company:* {{ $json.company_name || 'N/A' }}\n*Contact:* {{ ($json.first_name || 'N/A').trim() }}\n*Email:* {{ $json.email || 'N/A' }}\n*Intent:* {{ $json.intent_signal || 'N/A' }}\n*Score:* {{ $json.total_score ?? 'N/A' }}\n\n{{ $json.is_priority_override ? '⚡ *RESCUED LEAD:* ' + ($json.override_reason || 'Priority override triggered') + '\\n\\n' : '' }}📝 *Sales Brief:*\n{{ $json.ai_draft || 'AI Battlecard temporarily unavailable. Check AI node.' }}\n*Lead ID:* {{ $json.lead_id || 'N/A' }}"
+    },
+    "frequency_based": {
+      "text": "🔥 *LEAD RE-ENGAGEMENT*\n\n*Contact:* {{ $json.first_name || 'N/A' }}\n*Email:* {{ $json.email || 'N/A' }}\n*Intent:* {{ $json.intent_signal || 'N/A' }}\n*Touchpoints:* {{ $json.updated_touchpoints ?? $json.total_touchpoints ?? 'N/A' }}\n*Heat:* {{ $json.new_heat_score ?? $json.heat_score ?? 'N/A' }} — {{ $json.heat_tag || 'N/A' }}\n\n{{ $json.is_intent_upgrade ? '⬆️ Intent upgraded.' : '↩️ New tracked interaction.' }}\n\n👉 Review and consider follow-up."
+    },
+    "error": {
+      "text": "🚨 *LEAD ENGINE — EXECUTION ERROR*\n\n*Workflow:* {{ $json.workflow_name || 'Lead Engine Workflow' }}\n*Failed Node:* {{ $json.failed_node || 'Unknown Node' }}\n\n❌ *Error:* {{ $json.error_message || 'SYSTEM_EXECUTION_FAILURE' }}\n\n*Lead Context:*\n• Lead ID: {{ $json.lead_id || 'N/A' }}\n• Email: {{ $json.email || 'N/A' }}\n• Intent: {{ $json.intent_signal || 'N/A' }}\n\n⏱️ *Time:* {{ $json.captured_at || 'N/A' }}\n\n⚠️ *Action Required:* Investigate the failed node and error above.\n\n*Status:* SYSTEM_EXECUTION_FAILURE"
+    }
+  }
+}
