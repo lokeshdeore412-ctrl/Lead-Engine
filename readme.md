@@ -202,6 +202,30 @@ The current V1 package was developed and tested with:
 
 External services such as enrichment providers, AI providers, and Slack require valid credentials where used.
 
+## Cost Profile
+
+The system is designed around low-cost/self-hosted infrastructure.
+
+Core components:
+- n8n
+- PostgreSQL
+- lightweight website SDK
+- Slack
+- optional enrichment provider
+- optional LLM/API usage
+
+The workflow itself does not require a paid lead-intelligence platform.
+
+Infrastructure/API costs depend on:
+- event volume
+- enrichment provider
+- LLM usage
+- hosting
+- database size
+
+For a small deployment, the primary variable costs are therefore infrastructure,
+enrichment and AI usage rather than the workflow itself.
+
 # Deployment Options
 
 Choose the delivery model that fits your business.
